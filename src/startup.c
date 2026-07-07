@@ -1,3 +1,4 @@
+#include "lm3s6965.h"
 
 typedef void (*pFunc)(void);
 
@@ -23,10 +24,43 @@ void Reset(void) {
     while(1);
 }
 
+void Default_Handler(void) { while(1); }
+
+extern void SysTick_Handler(void);
+
+
 extern int _stack_top; 
 
 
 pFunc const vector_table[] __attribute__((section(".vector_table")))= {
     (pFunc) &_stack_top,
-    Reset
+    Reset,
+    Default_Handler,
+    Default_Handler,
+    Default_Handler,
+    Default_Handler,
+    Default_Handler,
+    Default_Handler,
+    Default_Handler,
+    Default_Handler,
+    Default_Handler,
+    Default_Handler,
+    Default_Handler,
+    Default_Handler,
+    Default_Handler,
+    SysTick_Handler
 };
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -144,3 +144,56 @@ before asking for guidance.
 To connect them to a peripheral (UART, SPI, etc.), GPIOAFSEL must
 be set for those pins — this hands control of the pin to the peripheral.
 GPIODEN must also be set to enable the digital function.
+
+---
+
+## Session 5 — SysTick: interrupts, vector table, tick counter
+
+### What was accomplished
+
+- Expanded the vector table from 2 to 16 entries, filling slots 2–14
+  with `Default_Handler` and placing `SysTick_Handler` at index 15.
+- Created `systick.c` and `systick.h` with `systick_init()`,
+  `SysTick_Handler`, and a `volatile uint32_t systick_count` counter.
+- Configured SysTick: STRELOAD = 11999 (1ms at 12MHz), STCURRENT = 0,
+  STCTRL with ENABLE + INTEN + CLK_SRC.
+- Main loop detects 1000 ticks and prints a character via UART —
+  confirmed one character per second in the terminal.
+
+### What was hard
+
+Nothing was particularly hard this session. The initialization pattern
+is becoming familiar — finding registers, calculating values, writing
+the init sequence — and the datasheet navigation was noticeably faster
+than previous sessions.
+
+### Mistakes to remember
+
+**Vector table index off by one.** SysTick is exception 15, which means
+index 15 in the vector table (0-indexed). With 13 `Default_Handler`
+entries filling slots 2–14, `SysTick_Handler` must be the 16th entry.
+Having one too few `Default_Handler` entries placed `SysTick_Handler`
+in the PendSV slot (index 14) — SysTick fired but jumped to garbage,
+silently doing nothing.
+
+**Always count vector table entries against the datasheet layout.**
+The Cortex-M3 TRM table is the ground truth — cross-check index numbers
+before assuming the handler is in the right slot.
+
+### What clicked
+
+Datasheet navigation is genuinely improving. Registers, base addresses,
+and bit fields were found independently and correctly this session
+without significant guidance. The "Initialization and Configuration"
+subsection pattern is now a reliable starting point for any new
+peripheral.
+
+### New concepts
+
+**SysTick reload value.** The timer fires every N+1 cycles where N is
+the STRELOAD value. For exactly 12,000 cycles (1ms at 12MHz): STRELOAD
+= 11999.
+
+**`volatile` for shared state between main and ISR.** Without
+`volatile`, the compiler caches `systick_count` in a register and the
+main loop never sees updates from the interrupt handler.
