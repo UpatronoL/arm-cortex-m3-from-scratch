@@ -47,8 +47,8 @@ addresses.
 ## Roadmap
 
 - [x] Linker script, startup code, vector table, reset handler
-- [ ] GPIO — toggle an LED via direct register writes
-- [ ] UART driver and mini printf
+- [X] GPIO — toggle an LED via direct register writes
+- [X] UART driver and mini printf
 - [ ] Interrupts — SysTick, NVIC, ring buffers
 - [ ] UART command shell
 - [ ] Cooperative / preemptive task scheduler
