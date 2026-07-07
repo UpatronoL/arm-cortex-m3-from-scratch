@@ -1,0 +1,6 @@
+-Iinclude
+-std=c11
+-ffreestanding
+-mcpu=cortex-m3
+-mthumb
+--target=arm-none-eabi

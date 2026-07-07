@@ -1,0 +1,32 @@
+
+typedef void (*pFunc)(void);
+
+extern int main(void);
+extern char _etext;
+extern char _data;
+extern char _edata;
+extern char _bstart;
+extern char _bend;
+
+void Reset(void) {
+    char *src = &_etext;
+    char *dst = &_data;
+
+    while (dst < &_edata) {
+        *dst++ = *src++;
+    }
+
+    for (dst = &_bstart; dst < &_bend; dst++) *dst = 0;
+
+    main();
+
+    while(1);
+}
+
+extern int _stack_top; 
+
+
+pFunc const vector_table[] __attribute__((section(".vector_table")))= {
+    (pFunc) &_stack_top,
+    Reset
+};
