@@ -49,6 +49,6 @@ addresses.
 - [x] Linker script, startup code, vector table, reset handler
 - [X] GPIO — toggle an LED via direct register writes
 - [X] UART driver and mini printf
-- [ ] Interrupts — SysTick, NVIC, ring buffers
+- [X] Interrupts — SysTick, NVIC, ring buffers
 - [ ] UART command shell
 - [ ] Cooperative / preemptive task scheduler

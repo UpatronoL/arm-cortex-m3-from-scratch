@@ -197,3 +197,186 @@ the STRELOAD value. For exactly 12,000 cycles (1ms at 12MHz): STRELOAD
 **`volatile` for shared state between main and ISR.** Without
 `volatile`, the compiler caches `systick_count` in a register and the
 main loop never sees updates from the interrupt handler.
+
+---
+
+## Session 6 — UART RX: ring buffer, interrupt-driven input, sentinel values
+
+### What was accomplished
+
+- Wrote `ring_buffer.h`/`ring_buffer.c`: a fixed-size (64-byte) circular
+  buffer with `volatile` `head`/`tail` indices, `rb_push`, `rb_pop`,
+  `rb_is_empty`, `rb_is_full`. Wraparound handled with `& (MAXSIZE - 1)`
+  since 64 is a power of two.
+- Enabled the UART0 RX interrupt (`UARTIM`, `NVIC_EN0`) and wrote
+  `UART0_Handler` to push each received byte into the ring buffer.
+- Wrote `uart_getc()`: checks `rb_is_empty()` first, returns a sentinel
+  if there's nothing to read yet, otherwise pops and returns the byte.
+- Wired `main()`'s loop to poll `uart_getc()` and echo back any byte
+  received, confirmed working over the QEMU terminal.
+
+### Mistakes to remember
+
+**A sentinel value must survive the full round trip, not just the return
+statement.** `uart_getc()` returns `int` specifically so that `-1` (no
+data) can be distinguished from a real byte, since a real byte only ever
+occupies `0..255`. But the caller in `main()` originally stored that
+return value into a `char`:
+
+```c
+char c = uart_getc();
+if (c) { ... }
+```
+
+Two independent bugs stacked here:
+
+1. **Truncation collides the sentinel with real data.** Assigning the
+   `int` return value to a `char` truncates it. Since plain `char` is
+   *unsigned* on this toolchain (confirmed via
+   `arm-none-eabi-gcc -dM -E -x c /dev/null | grep __CHAR_UNSIGNED__`),
+   `-1` truncates to `255` — which is nonzero, so the `if(c)` branch
+   fired on *every* iteration whether or not a byte had actually
+   arrived, spamming garbage output continuously.
+2. **Truthiness isn't the same as "not the sentinel."** Even after
+   fixing the variable's type to `int`, `if(c)` still tests "is this
+   nonzero" — and `-1` is nonzero. The condition has to explicitly
+   compare against the sentinel: `if (c != UART_NO_DATA)`.
+
+Both the storage type *and* the comparison had to be fixed together;
+fixing only one still leaves the other bug live.
+
+**Don't reuse compiler-reserved identifiers.** Reached for
+`__CHAR_UNSIGNED__` as a macro name for the new sentinel, not realizing
+it was already the actual predefined compiler macro used to check char
+signedness (see mistake #1 above) — reusing it would have silently
+redefined something the compiler relies on. Any identifier starting
+with two leading underscores (or `_` + a capital letter) is reserved
+for the implementation per C11 §7.1.3 — never define your own macros
+with that shape. Settled on `UART_NO_DATA` instead: descriptive,
+peripheral-scoped, not reserved.
+
+**`EOF` was the wrong name to reach for.** `EOF` means "this stream is
+exhausted, permanently" (end of file/socket). An empty ring buffer means
+"nothing available *right now*" — a transient, retryable state, not a
+terminal one. Borrowing `EOF`'s name would have been technically legal
+(same value, `-1`) but semantically misleading at every call site.
+
+### New concepts
+
+**Ring buffer wraparound via bitmask.** With a power-of-two buffer size,
+`(index + 1) & (SIZE - 1)` wraps the index back to 0 without a branch or
+modulo — cheaper and avoids signed-overflow edge cases modulo would
+have with signed indices.
+
+**Single-producer/single-consumer reasoning.** `UART0_Handler` (ISR)
+only ever touches `head`; `uart_getc` (foreground) only ever touches
+`tail`. That separation is what makes the check-then-pop sequence in
+`uart_getc` safe without needing to disable interrupts around it —
+worth re-verifying this holds if a second consumer or producer is ever
+added.
+
+---
+
+## Session 7 — mini_printf: variadic functions, sign vs. bit pattern
+
+### What was accomplished
+
+- Wrote `mini_printf.c`/`mini_printf.h`: a minimal `printf` supporting
+  `%d`, `%u`, `%x`, `%c`, `%s`, built on `stdarg.h` and `uart_putc`.
+- Shared structure across the numeric specifiers: extract digits
+  least-significant-first into a small stack buffer via repeated
+  `% base` / `/= base`, then print the buffer in reverse.
+- `%d` handles negative values with a leading `-`; `%u`/`%x` handle
+  the full unsigned range correctly, including bit patterns that look
+  negative when read as `int`.
+
+### Mistakes to remember
+
+**An always-true condition made a whole branch dead code.** The first
+draft of `%x`'s digit-to-character logic was
+`if (digit % 10 < 10) ... else ...`. For any `digit` in `0..15`,
+`digit % 10` is always in `0..9`, so the condition is always true —
+the `else` branch (meant to produce `'A'`–`'F'`) could never run.
+Every hex digit 10–15 printed the wrong character (e.g. `':'` instead
+of `'A'`) with no compiler warning, since the code was syntactically
+fine. Fixed to `if (digit < 10)`.
+
+**Fixing the branch exposed a second bug underneath it.** Once the
+`else` branch became reachable, `buffer[index++] = digit + 'A'` was
+still wrong — for `digit = 10` that's `10 + 'A'` = `'K'`, not `'A'`.
+Needed `(digit - 10) + 'A'` so `digit = 10` maps to offset `0` from
+`'A'`. A reminder that fixing a condition doesn't guarantee the code
+behind it is correct — worth tracing through concrete values (`digit
+= 10`, `digit = 15`) after any branch fix, not just confirming the
+branch is now reachable.
+
+**XOR is not negation.** First attempt at getting a negative `int`'s
+magnitude for `%d` was `i ^= 0xFF`. `0xFF` only covers the low 8 bits
+of a 32-bit `int` — XOR-ing with it leaves the upper 24 bits
+untouched, so it doesn't produce anything close to `-i` for most
+values. Correct two's complement negation is "flip every bit, then
+add one": `i = ~i + 1` (equivalent to the built-in unary `-`).
+
+**`%u`/`%x` aren't signed — don't borrow `%d`'s sign logic for them.**
+First pass at `%u`/`%x` copied `%d`'s "if negative, negate and print
+`-`" logic wholesale. But `%u`/`%x` display the raw bit pattern of the
+argument reinterpreted as unsigned, not a signed magnitude with a
+sign — `printf("%x", -1)` should print `ffffffff`, not `-1`. The
+actual bug underneath: doing `%`/`/` on a *signed* `int` that holds a
+"negative-looking" bit pattern uses signed division, which follows the
+dividend's sign and produces garbage digits. Fix was to read the
+argument into an `unsigned int` (`va_arg(args, unsigned int)`); the
+`int` → `unsigned int` conversion reinterprets the same bits rather
+than doing sign-extended math, so `%`/`/` on it behave correctly with
+no sign handling needed at all.
+
+**Copy-paste while adapting `%d`'s pattern to `%u` left stale
+references to the wrong variable.** After introducing `unsigned int b`
+for `%u`, two lines still referenced the old signed variable `i`:
+`digit = i % 10` (should read `b`) and `uart_putc(buffer[b])` in the
+print loop (should index with the loop variable, not `b` — which by
+that point had already been divided down to `0`, so it printed
+`buffer[0]` repeated `index` times instead of walking the buffer
+backwards). Caught by diffing the `%u` block line-by-line against the
+already-correct `%x` block, which has the same shape.
+
+**Forgot to count a character that wasn't inside the usual print
+loop.** `mini_printf`'s return value is a running `count` of bytes
+written, incremented at every `uart_putc`. The `-` sign for negative
+`%d` values is written *before* the digit loop starts, in its own
+`uart_putc('-')` call — easy to miss bumping `count` there since it's
+not inside either of the two loops where `count++` is the obvious,
+visible pattern.
+
+### New concepts
+
+**`int` → `unsigned int` conversion reinterprets bits, it doesn't do
+sign-aware math.** In C this conversion is well-defined as "reduce
+modulo `2^N`," which for a two's-complement machine is exactly
+"reinterpret the same 32 bits as unsigned." This is why casting/
+assigning into an `unsigned int` is the right tool for `%x`/`%u`
+formatting, instead of manually detecting sign and negating.
+
+### Open / deferred (not yet fixed — filed for later)
+
+- **Trailing `%` at the end of a format string.** If `c++` lands on
+  the format string's `'\0'` right after consuming a `%`, the `switch`
+  matches nothing, but the enclosing `for` loop's own `c++` still
+  fires before the loop condition is rechecked — stepping one byte
+  past the null terminator before `*c != '\0'` is evaluated again.
+  Only matters if `mini_printf` is ever fed untrusted/malformed format
+  strings; deferred since current call sites are all in this file's
+  own control.
+- **Unknown format specifiers don't consume a `va_arg`.** There's no
+  `default` case in the specifier `switch`, so an unrecognized
+  specifier prints nothing *and* leaves the corresponding argument
+  unconsumed — any specifier after it in the same call reads the
+  wrong argument. Same underlying failure mode as the `%u` bug above
+  (an argument silently not advancing through `va_arg`), just
+  triggered by a different cause.
+- **`INT_MIN` negation overflow.** `~i + 1` on `INT_MIN`
+  (`-2147483648`) overflows back to `INT_MIN` itself, since two's
+  complement has no positive counterpart for the most negative value.
+  `%d` with that exact argument would misbehave. Known limitation of
+  essentially every hand-rolled `itoa`; not addressed yet.
+- No `%%` escape for a literal percent sign.

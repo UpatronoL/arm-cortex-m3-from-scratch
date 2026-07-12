@@ -8,3 +8,4 @@
 #define GPIOF_DEN ((volatile uint32_t *) 0x4002551C)
 #define GPIODATA ((volatile uint32_t *) 0x40025004)
 #define GPIOAFSEL ((volatile uint32_t *) 0x40004420)
+#define NVIC_EN0 ((volatile uint32_t *) 0xE000E100)

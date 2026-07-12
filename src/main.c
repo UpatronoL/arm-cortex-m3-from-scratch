@@ -1,4 +1,5 @@
 #include "lm3s6965.h"
+#include "mini_printf.h"
 #include "systick.h"
 #include "uart.h"
 
@@ -9,11 +10,12 @@ int main(void) {
     *GPIODATA |= (1 << 0);
     uart_init();
     systick_init();
+    mini_printf("please start typing: \n");
     while (1) {
-        if (systick_count >= 1000) {
-            uart_putc('a');
-            systick_count = 0;
-        }
+        int c = uart_getc();
+        if(c != UART_NO_DATA) { 
+            uart_putc(c);
+        } 
     }
     return 0;
 }

@@ -6,6 +6,11 @@
 #define UARTFBRD ((volatile uint32_t *) 0x4000C028)
 #define UARTLCRH ((volatile uint32_t *) 0x4000C02C) 
 #define UARTCTL ((volatile uint32_t *) 0x4000C030)
+#define UARTIM ((volatile uint32_t *) 0x4000C038)
+
+#define UART_NO_DATA -1
 
 void uart_init(void);
 void uart_putc(char c);
+int uart_getc(void);
+void UART0_Handler(void);

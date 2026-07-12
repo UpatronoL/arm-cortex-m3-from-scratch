@@ -27,7 +27,7 @@ void Reset(void) {
 void Default_Handler(void) { while(1); }
 
 extern void SysTick_Handler(void);
-
+extern void UART0_Handler(void);
 
 extern int _stack_top; 
 
@@ -48,7 +48,13 @@ pFunc const vector_table[] __attribute__((section(".vector_table")))= {
     Default_Handler,
     Default_Handler,
     Default_Handler,
-    SysTick_Handler
+    SysTick_Handler,
+    Default_Handler,
+    Default_Handler,
+    Default_Handler,
+    Default_Handler,
+    Default_Handler,
+    UART0_Handler
 };
 
 
