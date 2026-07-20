@@ -380,3 +380,129 @@ formatting, instead of manually detecting sign and negating.
   `%d` with that exact argument would misbehave. Known limitation of
   essentially every hand-rolled `itoa`; not addressed yet.
 - No `%%` escape for a literal percent sign.
+
+---
+
+## Session 8 — UART command shell input: line buffering + mini_strtok
+
+### What was accomplished
+
+- `main.c`: a line-buffering loop that pulls bytes one at a time from
+  `uart_getc()` into a fixed `char` array, bounds-checked against
+  overflow, terminated on `'\r'`, and null-terminated correctly.
+- `mini_strtok.c`/`.h`: a hand-rolled, scaled-down `strtok` — pass a
+  real buffer on the first call, then `NULL` on subsequent calls to
+  keep pulling words out of the same line, using a `static` file-scope
+  pointer (`private_buffer`) to remember where the previous call left
+  off, the same way the real library function does internally.
+
+### Mistakes to remember
+
+**The same OR/AND (De Morgan's) mistake surfaced three separate
+times across this session, in three different lines of code.** Each
+time, a stop condition built from two "not equal to a constant" checks
+got joined with `||` instead of `&&`:
+```c
+while ((c = uart_getc()) != '\r' || c != UART_NO_DATA)   // main.c, attempt 1
+while ((c = uart_getc()) == '\r' || c != UART_NO_DATA)   // main.c, attempt 2 (polarity flipped too)
+while (*(buffer++) != ' ' || *buffer != '\0')             // mini_strtok.c
+```
+The general rule: "stop if A or B" always translates to "keep going
+only while (not A) **and** (not B)." Whenever two different-constant
+inequality checks (`x != K1`, `x != K2`) get OR'd together, the result
+is a near-tautology — a single value can't simultaneously equal *both*
+constants, so at least one side of the `||` is nearly always true, and
+the loop never stops when it should. Reach for `&&` whenever combining
+inequality checks into a stop condition, not `||`.
+
+**Polling loop stored every empty poll, not just real keystrokes.**
+`uart_getc()` returns immediately with `UART_NO_DATA` (`-1`) when
+nothing has arrived — it doesn't block. Early versions of the
+line-buffering loop stored *every* return value unconditionally,
+including empty polls, which happen far more often than real
+keystrokes arrive. Since nothing distinguished "real character" from
+"nothing yet," the buffer filled with `UART_NO_DATA`-derived garbage
+in microseconds, before the user finished typing even one key.
+
+First fix attempt filtered by printable-ASCII range
+(`c >= 32 && c <= 127`) — this technically worked (`-1` falls outside
+the range) but conflated two different concerns: excluding the
+sentinel vs. validating that input is printable. That range would
+also silently swallow backspace, tab, and other control characters
+later, as a side effect nobody asked for. Settled on the precise,
+intention-matching check instead: `c != UART_NO_DATA`.
+
+**Off-by-one in null-termination: postfix `++` writes at the *old*
+index, not the new one.** `buffer[index++] = '\0';` looks like it
+should "advance, then write," but postfix `++` returns the old value
+of `index` for use in the expression and only updates it afterward —
+so the write still lands on the last real character's slot, clobbering
+it. Same root confusion showed up again, in a different shape, inside
+`mini_strtok`'s scan loop: `*(buffer++) != ' '` bundles "read this
+character" and "advance past it" into one expression, and the advance
+fires as a side effect *during* the very comparison that ends the
+loop — so the pointer overshoots the delimiter by one position before
+the loop even registers it should stop. Fixed by separating the two
+actions: check `*start` on its own (no increment folded into the
+condition), and only `start++` inside the loop body once the check
+confirms it's safe to keep going. That leaves `start` sitting exactly
+on the delimiter/terminator when the loop exits, instead of one past it.
+
+**A cast at the call site doesn't fix a type mismatch at the
+callee.** While chasing an `int`/`char` mismatch between `main.c`'s
+buffer and `mini_strtok`'s parameter, tried `mini_strtok((char *)buffer)`
+as a fix. This doesn't work: once execution is inside `mini_strtok`,
+its own declared parameter type governs how pointer arithmetic and
+dereferencing behave (`buffer++` advances by `sizeof(int)` if the
+parameter is declared `int *`, regardless of what type the caller
+originally had or cast to at the call site). The real fix has to
+happen at the parameter's actual declaration, anchored to what the
+data *is* — a C string is always represented as `char`, independent
+of whatever any other function happens to declare.
+
+**Getting `strtok`'s `NULL`-continuation state machine right took
+three iterations.** Implementing "pass a buffer once, then `NULL` to
+resume" needs a `static` pointer to carry state between calls, since C
+gives no other way for one call to hand context to the next without a
+shared variable or explicit output parameter.
+1. First pass never wrote back into `private_buffer` at all —
+   state was computed locally and thrown away, so a later `NULL` call
+   had nothing valid to resume from.
+2. Second pass added the write, and correctly distinguished "found a
+   token" from "nothing was there at all" via `start == toc` — but
+   still unconditionally did the "consume delimiter, advance past it"
+   step even when the scan stopped at the string's real terminator
+   (as opposed to a space). That walked `private_buffer` one byte past
+   the end of the valid string into uninitialized memory, so a
+   *third* call (right after correctly returning the final token)
+   would scan garbage instead of reporting "no more tokens."
+3. Fixed by only performing the "terminate and advance past the
+   delimiter" step when the scan actually stopped on `' '`. When it
+   stopped on `'\0'` instead, `private_buffer` is left pointing
+   directly at that terminator — so the next call's `start == toc`
+   check fires immediately and correctly reports exhaustion.
+
+### New concepts
+
+**De Morgan's law as a practical loop-writing tool**, not just a
+boolean-algebra fact: "stop if A or B" → "continue while (not A) and
+(not B)." Worth reaching for explicitly any time a stop condition is
+built from more than one check.
+
+**Parameter types are the callee's contract with itself, not just
+the caller's.** A cast at a call site can silence a compiler warning
+about the argument, but it can't change how the function's own body
+interprets a pointer once execution is inside it — that's governed
+entirely by the parameter's declared type.
+
+### Open / deferred (matches real `strtok`'s own limitations, or
+judged low priority for now)
+
+- `mini_strtok(NULL)` called before any prior call with a real buffer
+  is undefined behavior (null-pointer dereference) — same footgun
+  real `strtok` has.
+- Leading delimiters aren't skipped: a string starting with `' '`
+  returns "no token" immediately rather than skipping to the first
+  real word, unlike real `strtok`. Doesn't matter for the current
+  fixed-format line input; would matter if input parsing gets more
+  freeform later.
