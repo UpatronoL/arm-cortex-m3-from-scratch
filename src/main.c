@@ -1,17 +1,18 @@
 #include "lm3s6965.h"
 #include "mini_printf.h"
+#include "mini_strtok.h"
+#include "mini_strcmp.h"
 #include "systick.h"
 #include "uart.h"
-#include "mini_strtok.h"
+#include "shell.h"
 
 #define MAXSIZE 1024
 
 int main(void) {
     char buffer[MAXSIZE];
     int index = -1;
-    int c;
+    int c, i;
     char *token = 0;
-    // char *error = {""};
     *RCGC2 |= (1 << 5);
     *GPIODIR |= (1 << 0);
     *GPIOF_DEN |= (1 << 0);
@@ -30,12 +31,17 @@ int main(void) {
         // }
         index++;
         buffer[index] = '\0';
+        uart_putc('\r');
 
         token = mini_strtok(buffer);
-        while (token != 0) {
-            mini_printf("%s\r\n", token);
-
-            token = mini_strtok(0);
+        if (token != 0) {
+            for (i = 0; i < handler_size; i++) {
+                if (!mini_strcmp(token, command_handler[i].name)) {
+                    command_handler[i].function();
+                    break;
+                }
+            }
+            if(i >= handler_size) mini_printf("Unknown Command Entered!!\r");
         }
         index = -1;
     }

@@ -506,3 +506,188 @@ judged low priority for now)
   real word, unlike real `strtok`. Doesn't matter for the current
   fixed-format line input; would matter if input parsing gets more
   freeform later.
+
+---
+
+## Session 9 — Command dispatch: mini_strcmp, function-pointer table, shell.c/.h
+
+### What was accomplished
+
+- Wrote `mini_strcmp.c`/`.h`: a hand-rolled `strcmp` returning `0` on
+  equal strings, nonzero otherwise — used to match a typed command
+  word against known command names.
+- Wrote `shell.c`/`shell.h`: a `typedef`'d function-pointer type
+  (`pfnHandler`, `void (*)(void)`), a `Handler` struct pairing a
+  command name with one of those pointers, a `command_handler[]`
+  table of `{name, handler}` entries, and two handlers (`LedOnOff`,
+  `PullupOnOff`) that each pull their own argument via
+  `mini_strtok(0)` and print ON/OFF or an argument-error message.
+- Wired a dispatch loop into `main.c`: after the line-buffering loop
+  from Session 8 hands off a full line, `mini_strtok(buffer)` pulls
+  the first word, a `for` loop over `command_handler[]` matches it
+  by name via `mini_strcmp` and calls the matching handler, printing
+  an "Unknown Command" message if nothing matched.
+- Confirmed on QEMU: `Led ON`, `Pullup OFF`, an unrecognized command,
+  and a bare Enter (empty line) all behave as designed.
+
+### Design decisions
+
+**Table over if/else chain, no return code on handlers.** Chose a
+`{name, function pointer}` table (looped over with `mini_strcmp`)
+over an `if`/`else if` chain on command names, for scalability as
+more commands get added. Looked at how the Linux kernel handles
+error reporting (negative-errno convention, e.g. `-ENOMEM`, checked
+via `ret < 0`) as a reference point, but decided it was overkill at
+this scale — handlers are `void` and print their own error messages
+directly (e.g. `"Argument Error: Led <arg ON/OFF>"`) rather than
+returning a code for a central dispatcher to translate through an
+error-message table. Worth revisiting only if the shell grows enough
+commands/composability to need structured error propagation.
+
+**Table size via `sizeof`, not a sentinel row.** Since
+`command_handler[]` is a fixed, compile-time-known list, computed
+`sizeof(command_handler)/sizeof(command_handler[0])` instead of
+adding a `{0, 0}` terminator row — one less thing that could be
+forgotten and silently walk off the end of the array.
+
+### Mistakes to remember
+
+**`mini_strcmp` went through three iterations before the loop
+condition was right — the same "stop condition built from more than
+one check" trap as Session 8's `||`/`&&` mixups.**
+1. First attempt, `while (a++ && b++) { if (*a != *b) return -1; }`,
+   had two separate bugs: the condition tested pointer truthiness
+   (always true for non-null pointers, not "have we hit `'\0'`"),
+   and postfix `++` inside the condition meant `*a`/`*b` inside the
+   loop body were read *after* the pointers had already advanced —
+   the exact same postfix-side-effect trap as `mini_strtok`'s
+   `*(buffer++) != ' '` bug from Session 8.
+2. Second attempt, `while ((*a != '\0') && (*b != '\0'))`, fixed the
+   condition to check for the actual string terminator and moved the
+   increments out of the condition — correct for equal-length
+   strings, but wrong for one string being a prefix of the other
+   (e.g. `"cat"` vs `"cats"`): `&&` stops the loop the moment
+   *either* pointer hits `'\0'`, before the mismatch at that position
+   is ever checked, so `"cat"` and `"cats"` compared equal.
+3. Final version switched to `||` (stop only once *both* have hit
+   `'\0'`) with each pointer's increment individually guarded
+   (`if (*a != '\0') a++`) so a shorter string's pointer doesn't walk
+   past its own terminator while the loop keeps running for the
+   longer one. This correctly detects the "cat"/"cats" mismatch
+   (`'\0' != 's'`) and handles the equal, empty-string, and
+   completely-different cases too.
+
+**Changing `mini_strcmp` to return `1` on success (to drop `!` at
+call sites) silently reintroduced a truthy/falsy bug — the fourth
+occurrence of this exact bug shape in the project.** The edit only
+touched the success return (`0` → `1`); the failure path still
+returned `-1`, which is also truthy. Once both "equal" and "not
+equal" returned nonzero values, `if (mini_strcmp(...))` could no
+longer distinguish them at all. Reverted to the standard C
+convention (`0` = equal, nonzero = different) and fixed the call
+sites to check explicitly (`!mini_strcmp(...)` or `== 0`) instead of
+relying on truthiness. Same underlying lesson as the `UART_NO_DATA`
+truncation bug (Session 6) and the `||`/`&&` mixups (Session 8):
+"nonzero" is not the same question as "equals the specific value I
+mean" — worth checking this explicitly any time a function's return
+value feeds an `if` directly.
+
+**`command_handler[]` defined in the header instead of declared
+`extern`.** First version of `shell.h` had the full array literal
+(with its initializer) sitting directly in the header. This
+compiled fine as long as only `shell.c` included `shell.h` — but an
+array *definition* (not just a declaration) in a header means every
+`.c` file that includes it gets its own copy of that storage with
+external linkage, which fails at link time the moment a second file
+(`main.c`) includes the same header and the linker sees
+`command_handler` defined twice. Same declaration-vs-definition
+split as the linker-symbol lesson from Session 1–2 (`_stack_top`):
+fixed by putting only `extern Handler command_handler[];` in the
+header and keeping the one real definition (with its initializer) in
+`shell.c`.
+
+**`sizeof` on an `extern` array declared without a bound fails —
+only the file with the actual initializer knows the size.**
+`extern Handler command_handler[];` in the header has no length
+information (no bound, no initializer), so `main.c` couldn't compute
+`sizeof(command_handler)/sizeof(command_handler[0])` — the compiler
+reported `command_handler` as an incomplete type. Fixed by computing
+the count *once*, in `shell.c` where the initializer is visible
+(`const int handler_size = sizeof(command_handler)/sizeof(...)`),
+and exposing that pre-computed count to `main.c` the same way as the
+array itself — `extern const int handler_size;` in `shell.h`.
+
+**First dispatch-loop draft called handlers directly by name
+(`if (!mini_strcmp(token, "Led")) LedOnOff();`), bypassing the
+function-pointer table entirely** — defeating the reason a table was
+chosen over an `if`/`else if` chain in the first place. Also had no
+reassignment of `token` inside the loop, making it infinite for any
+non-empty command line. Rewritten as a `for` loop over
+`command_handler[]`, matching by name and calling through
+`.function()`.
+
+**Naming a function pointer without `()` doesn't call it.**
+`command_handler[i].function;` (no parentheses) merely names the
+function pointer value and discards it — compiles under `-Wall
+-Wextra` but does nothing at runtime. Needed `command_handler[i].function();`
+to actually invoke the handler through the pointer.
+
+**No guard against `mini_strtok` returning `0` (empty line) before
+handing it to `mini_strcmp` in the dispatch loop.** Pressing Enter
+with no text makes `mini_strtok(buffer)` return `0` (correctly, by
+its own contract) — but the dispatch loop originally passed that
+straight into `mini_strcmp(token, command_handler[i].name)`, which
+dereferences its first argument on its very first line, a
+null-pointer dereference. `LedOnOff`/`PullupOnOff` already guarded
+their own `mini_strtok(0)` call the same way — the dispatch loop
+needed the identical `if (token != 0) { ... }` guard around itself.
+
+**Stale loop-index bug when the empty-line guard above was added.**
+The "was a match found?" check (`if (i >= handler_size) mini_printf
+("Unknown Command...")`) originally sat *outside* the new
+`if (token != 0)` block. On an empty-line iteration, the `for` loop
+never runs at all, so `i` still holds whatever value it was left at
+from the *previous* real command lookup — meaning the "unknown
+command" check could fire (or not) based on stale state completely
+unrelated to the current, empty input. Fixed by moving the
+match-check inside the same `if (token != 0)` block as the `for`
+loop, so `i` is only ever inspected in the same iteration where the
+loop actually set it.
+
+### New concepts
+
+**Function pointers**: `void (*pfnHandler)(void)` declares a
+*variable* that can hold the address of any `void`-returning,
+no-argument function, and can be called through
+(`pfnHandler(); `/`ptr()`) — not a function itself. The parentheses
+around `*name` are load-bearing: `void *f(void)` (no parens) instead
+declares a function *returning* `void *`, a completely different
+declaration.
+
+**Declaration vs. definition applies to arrays and function tables
+just like it applies to linker symbols.** A header should generally
+only ever contain `extern` declarations for global data — the
+actual storage-allocating definition belongs in exactly one `.c`
+file, or every other file that includes the header risks a
+multiple-definition link error.
+
+**`const` doesn't stop a value from needing `extern` linkage.**
+`const int handler_size` still needs `extern const int handler_size;`
+in the header for other files to see it — `const` only means "can't
+be reassigned after initialization," it says nothing about whether
+other translation units can link against it.
+
+### Design detour: Linux kernel error-handling conventions
+
+Looked at how the kernel signals and propagates errors as a
+reference point while deciding on handler return types:
+negative-errno convention (`return -ENOMEM;`, callers check
+`if (ret < 0)`), string translation only happening at the user-space
+boundary rather than at every internal call site, and `ERR_PTR`/
+`PTR_ERR`/`IS_ERR` for encoding an error into an otherwise-invalid
+pointer (set aside as inapplicable here — no MMU/virtual memory to
+guarantee reserved invalid addresses). Concluded the current shell
+is small enough that `void` handlers with self-printed messages are
+the right-sized solution; the kernel's pattern would earn its keep
+if the shell grows into something needing structured error
+propagation between layers.
